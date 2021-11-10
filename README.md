@@ -1,4 +1,7 @@
 # Blind Image Super-resolution with Elaborate Degradation Modeling on Noise and Kernel
+
+[![GitHub version](https://badge.fury.io/gh/zsyOAOA%2FBSRDM.svg)](https://badge.fury.io/gh/zsyOAOA%2FBSRDM)![visitors](https://visitor-badge.glitch.me/badge?page_id=zsyOAOA/BSRDM) 
+
 This repository is the official PyTorch implementation of BSRDM with application to blind image super-resolution ([arXiv](https://arxiv.org/abs/2107.00986)).
 
 ---
