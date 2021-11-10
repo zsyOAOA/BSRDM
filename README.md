@@ -3,7 +3,7 @@ This repository is the official PyTorch implementation of BSRDM with application
 
 ---
 >While researches on model-based blind single image super-resolution (SISR) have achieved tremendous successes recently, most of them do not consider the image degradation sufficiently. Firstly, they always assume image noise obeys an independent and identically distributed (i.i.d.) Gaussian or Laplacian distribution, which largely underestimates the complexity of real noise. Secondly, previous commonly-used kernel priors (e.g., normalization, sparsity) are not effective enough to guarantee a rational kernel solution, and thus degenerates the performance of subsequent SISR task. To address the above issues, this paper proposes a model-based blind SISR method under the probabilistic framework, which elaborately models image degradation from the perspectives of noise and blur kernel. Specifically, instead of the traditional i.i.d. noise assumption, a patch-based non-i.i.d. noise model is proposed to tackle the complicated real noise, expecting to increase the degrees of freedom of the model for noise representation. As for the blur kernel, we novelly construct a concise yet effective kernel generator, and plug it into the proposed blind SISR method as an explicit kernel prior (EKP). To solve the proposed model, a theoretically grounded Monte Carlo EM algorithm is specifically designed. Comprehensive experiments demonstrate the superiority of our method over current state-of-the-arts on synthetic and real datasets.
-><img src="./figures/framework.jp2" align="middle" width="800">
+><img src="./figures/framework.jpg" align="middle" width="800">
 
 ---
 ## Requirements
@@ -31,7 +31,7 @@ This repository is the official PyTorch implementation of BSRDM with application
     ```
     python demo_real.py --sf 2
     ```
-2. Note that in our paper we uniformly set the hyper-parameter $\rho$ to be $0.2$. In this manuscript, we adjust the settings of $\rho$ for some images based on the visual results. And the suggested values for $\rho$ is in the range [0.2, 0.4].
+2. Note that in our paper we uniformly set the hyper-parameter \rho to be 0.2. In this manuscript, we adjust the settings of \rho for some images based on the visual results. And the suggested values for \rho is in the range [0.2, 0.4].
 
 ## License & Acknowledgement
 This project is realeased under the GPL-3.0 license. The codes are based on [CBDNet](https://github.com/GuoShi28/CBDNet), [ResizeRight](https://github.com/assafshocher/ResizeRight), [DIP](https://github.com/DmitryUlyanov/deep-image-prior), and [FKP](https://github.com/JingyunLiang/FKP). Please also follow their licenses. Thanks for their great efforts.
