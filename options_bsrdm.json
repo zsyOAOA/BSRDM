@@ -1,0 +1,35 @@
+{
+    # data settings
+    "sf": 2,                               # Scale factor for SISR
+
+    # model settings
+    "gamma": 0.67,                         # Hyperparameters for lapalacian prior, default: 0.67
+    "rho": 0.20,                           # Gradient penalty, low resolution: 0.3, high resolution: 0.2
+    "internal_iter_M": 50,                 # internal iterations of M step
+    "window_variance": 15,                 # window size to estimate variance
+    "langevin_steps": 5,                   # numbers for langevin dynamics
+    "delta": 1.00,                         # step size for langevin dynamics, 1.00
+    "update_var_freq": 50,                 # Frequence to updata variance
+    "noise_estimator": "niid",               # Noise estimation method: iid or niid
+
+    # training settings
+    "seed": 1000,                          # Random seed
+    "gpu_id": 0,                           # GPU index
+    "max_iters": 400,                      # Maximul iterations for EM algorithm, default:400 
+    "log_dir": "./logs",                     # folder of tensorboard log
+    "lr_G": 2e-3,                          # learning rate for image generator
+    "lr_K": 5e-3,                          # learning rate for kernel code
+    "disp": 1,                             # whether to display logs
+    "print_freq": 20,                      # print frequence
+    "max_grad_norm_G": 10,                 # print frequence
+    "downsampler": "direct",                 # bicubic or direct
+
+    # generator settings
+    "input_chn": 8,                        # Number of channels for the input latent vector z
+    "n_scales": 3,
+    "down_chn_G": [96, 96, 96],
+    "up_chn_G": [96, 96, 96],
+    "skip_chn_G": 16,
+    "use_bn_G": "True"
+}
+
