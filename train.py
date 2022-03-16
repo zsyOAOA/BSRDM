@@ -7,15 +7,14 @@ import sys
 import random
 import numpy as np
 from SSIM import SSIM
+from math import sqrt, ceil, inf
 from shutil import rmtree
 from pathlib import Path
 from network.skip import skip
-from math import sqrt, ceil, inf
 from skimage import img_as_float32, img_as_ubyte
-from utils_bsrdm import calculate_psnr, calculate_ssim, modcrop
 
+import utils_bsrdm as utils
 from ResizeRight.resize_right import resize
-from ResizeRight.interp_methods import cubic, linear
 
 import torch
 from torch import optim
@@ -25,6 +24,47 @@ import torch.nn.utils as nutils
 from torch.utils.tensorboard import SummaryWriter
 
 torch.set_default_tensor_type(torch.FloatTensor)
+
+def ekp_kernel_generator(U, kernel_size=15, sf=3, shift='left'):
+    '''
+    Generate Gaussian kernel according to cholesky decomposion.
+    \Sigma = M * M^T, M is a lower triangular matrix.
+    Input:
+        U: 2 x 2 torch tensor
+        sf: scale factor
+    Output:
+        kernel: 2 x 2 torch tensor
+    '''
+    #  Mask
+    mask = torch.tensor([[1.0, 0.0],
+                         [1.0, 1.0]], dtype=torch.float32).to(U.device)
+    M = U * mask
+
+    # Set COV matrix using Lambdas and Theta
+    INV_SIGMA = torch.mm(M.t(), M)
+
+    # Set expectation position (shifting kernel for aligned image)
+    if shift.lower() == 'left':
+        MU = kernel_size // 2 - 0.5 * (sf - 1)
+    elif shift.lower() == 'center':
+        MU = kernel_size // 2
+    elif shift.lower() == 'right':
+        MU = kernel_size // 2 + 0.5 * (sf - 1)
+    else:
+        sys.exit('Please input corrected shift parameter: left , right or center!')
+
+    # Create meshgrid for Gaussian
+    X, Y = torch.meshgrid(torch.arange(kernel_size), torch.arange(kernel_size))
+    Z = torch.stack((X, Y), dim=2).unsqueeze(3).to(U.device)   # k x k x 2 x 1
+
+    # Calcualte Gaussian for every pixel of the kernel
+    ZZ = Z - MU
+    ZZ_t = ZZ.permute(0,1,3,2)                  # k x k x 1 x 2
+    raw_kernel = torch.exp(-0.5 * torch.squeeze(ZZ_t.matmul(INV_SIGMA).matmul(ZZ)))
+
+    # Normalize the kernel and return
+    kernel = raw_kernel / torch.sum(raw_kernel)   # k x k
+    return kernel.unsqueeze(0).unsqueeze(0)
 
 class Trainer:
     def __init__(self, args, im_LR, im_HR=None, kernel_gt=None):
@@ -40,18 +80,18 @@ class Trainer:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
 
         # load data
-        self.tidy_data_LR(im_LR)      # self.im_LR: 1 x c x h x w, torch tensor, float32, [0, 1], cuda 
-        self.tidy_data_HR(im_HR, kernel_gt)      # self.im_HR: h x w x c, numpy array, uint8, [0, 255] 
-                                                 # self.kernel_gt: 1 x 1 x k x k, torch tensor, float32 
+        self.tidy_data_LR(im_LR)              # self.im_LR: 1 x c x h x w, torch tensor, float32, [0, 1], cuda
+        self.tidy_data_HR(im_HR, kernel_gt)   # self.im_HR: h x w x c, numpy array, uint8, [0, 255]
+                                              # self.kernel_gt: 1 x 1 x k x k, torch tensor, float32
         self.num_pixels = self.im_LR.numel()
 
         # determine kernel size
         self.kernel_size = (args.sf * 2 + 1) * 2 + 1
 
-        # make 8 gradient filters
-        self.make_gradient_filter()   # self.grad_filters: 8 x 3 x 3, torch tensor, cuda
+        # make gradient filters
+        self.make_gradient_filter()   # self.grad_filters: 4 x 3 x 3, torch tensor, cuda
 
-        # make gaussian or average filter to estimate variance
+        # make average filter to estimate variance
         self.make_variance_filter()   # self.grad_filters: 1 x 1 x p x p, torch tensor, cuda
 
     def tidy_data_LR(self, im_LR):
@@ -68,9 +108,8 @@ class Trainer:
         if im_HR is None:
             self.im_HR = None
         else:
-            im_HR = modcrop(im_HR, self.args.sf)
-            if im_HR is not None:
-                self.im_HR = img_as_ubyte(im_HR) if im_HR.dtype != np.uint8 else im_HR
+            im_HR = utils.modcrop(im_HR, self.args.sf)
+            self.im_HR = img_as_ubyte(im_HR) if im_HR.dtype != np.uint8 else im_HR
 
             if kernel_gt is not None:
                 self.kernel_gt = torch.from_numpy(kernel_gt[None, None, ]).type(torch.float32).cuda()
@@ -115,24 +154,16 @@ class Trainer:
         '''
         Args:
             im_HR: N x c x h x w, torch tensor
-            kernel: 1 x 1 x k x k, torch tensor 
+            kernel: 1 x 1 x k x k, torch tensor
         '''
         hr_pad = F.pad(input = self.im_HR_est, mode = padding_mode, pad = (self.kernel_size // 2, ) * 4)
         out = F.conv2d(hr_pad, self.kernel_est.expand(hr_pad.shape[1], -1, -1, -1), groups=hr_pad.shape[1])
         if self.args.downsampler.lower() == 'direct':
             self.im_LR_est = out[:, :, 0::self.args.sf, 0::self.args.sf]
         elif self.args.downsampler.lower() == 'bicubic':
-            self.im_LR_est = resize(input = out,
-                                    scale_factors = 1/self.args.sf,
-                                    out_shape = self.im_LR.shape[-2:],
-                                    interp_method = cubic)
-        elif self.args.downsampler.lower() == 'bilinear':
-            self.im_LR_est = resize(input = out,
-                                    scale_factors = 1/self.args.sf,
-                                    out_shape = self.im_LR.shape[-2:],
-                                    interp_method = linear)
+            self.im_LR_est = resize(out, scale_factors=1/self.args.sf)
         else:
-            sys.exit('Please input corrected downsampler: bicubic, bilinear or direct')
+            sys.exit('Please input corrected downsampler: Bicubic or Downsampler!')
 
         return self.im_LR_est
 
@@ -145,7 +176,7 @@ class Trainer:
         return torch.abs(out.squeeze(0))
 
     def estimate_variance(self, padding_mode="reflect"):
-        noise2 = (self.im_LR - self.im_LR_est.data)**2 
+        noise2 = (self.im_LR - self.im_LR_est.data)**2
         if self.args.noise_estimator.lower() == 'niid':
             noise2_pad = F.pad(input=noise2, mode = padding_mode, pad = ((self.args.window_variance - 1) //2, )*4)
             self.lambda_p = F.conv2d(input = noise2_pad,
@@ -165,8 +196,8 @@ class Trainer:
         return loss, likelihood,  grad_loss
 
     def get_loss_Estep(self, eps=1e-8):
-        likelihood = 0.5 * ((1/self.lambda_p) * (self.im_LR - self.blur_and_downsample())**2).sum() 
-        grad_loss = self.args.rho * torch.pow(self.calculate_grad_abs()+eps, self.args.gamma).sum() 
+        likelihood = 0.5 * ((1/self.lambda_p) * (self.im_LR - self.blur_and_downsample())**2).sum()
+        grad_loss = self.args.rho * torch.pow(self.calculate_grad_abs()+eps, self.args.gamma).sum()
         loss = likelihood + grad_loss + 0.5 * (self.Z**2).sum()
 
         return loss
@@ -184,9 +215,9 @@ class Trainer:
     def calculate_metrics(self, ycbcr=True):
         im_HR_est = img_as_ubyte(np.clip(self.im_HR_est.data.cpu().numpy().transpose([0,2,3,1]).squeeze(), 0.0, 1.0))
         if self.im_HR.ndim == 2:
-            ycbcr = False 
-        psnr = calculate_psnr(self.im_HR, im_HR_est, border=self.args.sf**2, ycbcr=ycbcr)
-        ssim = calculate_ssim(self.im_HR, im_HR_est, border=self.args.sf**2, ycbcr=ycbcr)
+            ycbcr = False
+        psnr = utils.calculate_psnr(self.im_HR, im_HR_est, border=self.args.sf**2, ycbcr=ycbcr)
+        ssim = utils.calculate_ssim(self.im_HR, im_HR_est, border=self.args.sf**2, ycbcr=ycbcr)
 
         return psnr, ssim
 
@@ -204,18 +235,19 @@ class Trainer:
                               upsample_mode='bilinear',
                               need_sigmoid=True,
                               need_bias=True,
-                              pad='reflection', 
+                              pad='reflection',
                               act_fun='LeakyReLU',
                               use_bn = self.args.use_bn_G).cuda()
         self.optimizer_G = optim.Adam(params=self.generator.parameters(), lr=lr_G_temp)
+        if self.args.disp == 1:
+            log_str = 'Number of parameters in Generator: {:.2f}K'
+            print(log_str.format(utils.calculate_parameters(self.generator)/1000))
+            print('Initiliazing the generator...')
 
         H_up, W_up = int(self.im_LR.shape[2] * self.args.sf), int(self.im_LR.shape[3] * self.args.sf)
         self.Z = torch.randn([1, self.args.input_chn, H_up, W_up]).cuda()
         self.lambda_p = torch.ones_like(self.im_LR, requires_grad=False) * (0.01**2)
 
-        if self.args.disp == 1:
-            print('Initiliazing the generator...')
-        # Such initialization based on SSIM is borrowed from DIPFKP
         ssimloss = SSIM()
         im_HR_base = F.interpolate(self.im_LR, size=(H_up, W_up), mode='bilinear', align_corners=False)
         for kk in range(50):
@@ -232,11 +264,11 @@ class Trainer:
             print('Initiliazing the kernel...')
 
         # Kernel Prior
-        l1 = 1 / (self.args.sf * 1.00) 
+        l1 = 1 / (self.args.sf * 1.00)
         self.kernel_code = torch.tensor([[l1,  0.0],
                                          [0.0, l1]], dtype=torch.float32).cuda()
         self.kernel_code.requires_grad = True
-        self.optimizer_kernel = optim.Adam(params=[self.kernel_code], lr=self.args.lr_K)
+        self.optimizer_kernel = optim.Adam(params=[self.kernel_code,], lr=self.args.lr_K)
 
     def get_HR_res(self):
         return img_as_ubyte(self.im_HR_est.detach().cpu().squeeze(0).clamp_(0.0,1.0).numpy().transpose((1,2,0)))
@@ -250,8 +282,6 @@ class Trainer:
             for key in vars(self.args):
                 value = str(getattr(self.args, key))
                 print('{:25s}: {:s}'.format(key, value))
-
-        if self.args.disp == 1:
             self.open_log()
 
         self.initialize_G()
@@ -267,8 +297,11 @@ class Trainer:
                 self.optimizer_G.zero_grad()
                 self.optimizer_kernel.zero_grad()
                 self.im_HR_est = self.generator(self.Z)
-                self.kernel_est = kernel_generate(self.kernel_code, self.kernel_size, self.args.sf)
-                loss, likelihood, grad_loss = self.get_loss_Mstep() 
+                self.kernel_est = ekp_kernel_generator(self.kernel_code,
+                                                       kernel_size=self.kernel_size,
+                                                       sf=self.args.sf,
+                                                       shift=self.args.kernel_shift)
+                loss, likelihood, grad_loss = self.get_loss_Mstep()
                 loss.backward()
                 grad_norm_G = nutils.clip_grad_norm_(self.generator.parameters(), self.args.max_grad_norm_G)
                 self.optimizer_kernel.step()
@@ -278,17 +311,17 @@ class Trainer:
                     lr_G = self.optimizer_G.param_groups[0]['lr']
                     lr_K = self.optimizer_kernel.param_groups[0]['lr']
                     if self.im_HR is None:
-                        log_str = 'Iter:{:04d}/{:04d}, Loss:{:.2e}/{:.2e}/{:.2e}, normG:{:.2e}/{:.2e}, lrG:{:.2e}/{:.2e}' 
+                        log_str = 'Iter:{:04d}/{:04d}, Loss:{:.2e}/{:.2e}/{:.2e}, normG:{:.2e}/{:.2e}, lrG:{:.2e}/{:.2e}'
                         print(log_str.format(num_iters, self.args.max_iters, loss.item(), likelihood.item(),
                                                    grad_loss.item(), grad_norm_G, self.args.max_grad_norm_G, lr_G, lr_K))
                     else:
                         psnr, ssim = self.calculate_metrics(ycbcr=True)
                         log_str = 'Iter:{:04d}/{:04d}, Loss:{:5.3f}/{:5.3f}/{:5.3f}, PSNR:{:5.2f}, ' + \
-                                                                 'SSIM:{:6.4f}, normG:{:.2e}/{:.2e}, lrG/K:{:.2e}/{:.2e}' 
+                                                                 'SSIM:{:6.4f}, normG:{:.2e}/{:.2e}, lrG/K:{:.2e}/{:.2e}'
                         print(log_str.format(num_iters, self.args.max_iters, loss.item(), likelihood.item(),
                                        grad_loss.item(), psnr, ssim, grad_norm_G, self.args.max_grad_norm_G, lr_G, lr_K))
 
-                    # tensorboard 
+                    # tensorboard
                     self.writer.add_scalar('LossM', loss.item(), self.log_loss_step)
                     self.log_loss_step += 1
                     if self.im_HR is None:
@@ -308,60 +341,30 @@ class Trainer:
                     self.writer.add_image('LR Image', x3, self.log_im_step)
                     self.log_im_step += 1
 
-                # M-Step: update noise variance
-                if num_iters % self.args.update_var_freq == 0 and num_iters < 300:
-                    self.estimate_variance()
+            # update noise variance
+            if num_iters < 300:
+                self.estimate_variance()
 
             # E-Step
             self.freeze_parameters()
             with torch.set_grad_enabled(False):
-                self.kernel_est = kernel_generate(self.kernel_code, self.kernel_size, self.args.sf)
+                self.kernel_est = ekp_kernel_generator(self.kernel_code,
+                                                       kernel_size=self.kernel_size,
+                                                       sf=self.args.sf,
+                                                       shift=self.args.kernel_shift)
             for kk in range(self.args.langevin_steps):
                 self.im_HR_est = self.generator(self.Z)
-                loss = self.get_loss_Estep() 
+                loss = self.get_loss_Estep()
 
                 loss.backward()
                 self.clip_grad_Z()
-                
+
                 self.Z.data = self.Z.data - 0.5 * self.args.delta**2 * self.Z.grad.data
-                if kk < (self.args.langevin_steps / 3):
-                    self.Z.data = self.Z.data + self.args.delta * torch.randn_like(self.Z) / (self.norm_Z + 1e-6)
+                if kk < (self.args.langevin_steps / 3.0):
+                    self.Z.data = self.Z.data + self.args.delta * torch.randn_like(self.Z) / self.norm_Z
                 self.Z.grad.fill_(0)
             self.unfreeze_parameters()
 
         if self.args.disp == 1:
             self.close_log()
 
-def kernel_generate(U, kernel_size=15, sf=3):
-    '''
-    Generate Gaussian kernel according to cholesky decomposion.
-    \Sigma = M * M^T, M is a lower triangular matrix.
-    Input:
-        U: 2 x 2 torch tensor
-        sf: scale factor
-    Output:
-        kernel: 2 x 2 torch tensor
-    '''
-    #  Mask
-    mask = torch.tensor([[1.0, 0.0],
-                         [1.0, 1.0]], dtype=torch.float32).to(U.device)  
-    M = U * mask
-
-    # Set COV matrix using Lambdas and Theta
-    INV_SIGMA = torch.mm(M.t(), M)
-
-    # Set expectation position (shifting kernel for aligned image)
-    MU = kernel_size // 2 - 0.5 * (sf - 1) # - 0.5 * (scale_factor - k_size % 2)
-
-    # Create meshgrid for Gaussian
-    X, Y = torch.meshgrid(torch.arange(kernel_size), torch.arange(kernel_size))
-    Z = torch.stack((X, Y), dim=2).unsqueeze(3).to(U.device)   # k x k x 2 x 1
-
-    # Calcualte Gaussian for every pixel of the kernel
-    ZZ = Z - MU
-    ZZ_t = ZZ.permute(0,1,3,2)                  # k x k x 1 x 2
-    raw_kernel = torch.exp(-0.5 * torch.squeeze(ZZ_t.matmul(INV_SIGMA).matmul(ZZ))) 
-
-    # Normalize the kernel and return
-    kernel = raw_kernel / torch.sum(raw_kernel)   # k x k
-    return kernel.unsqueeze(0).unsqueeze(0)

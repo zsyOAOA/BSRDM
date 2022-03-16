@@ -11,20 +11,23 @@ import numpy as np
 from scipy import ndimage
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-from skimage import img_as_float32, img_as_ubyte
-
-# Imresize
 from ResizeRight.resize_right import resize
-from ResizeRight.interp_methods import cubic, linear
-
-# Camera ISP
 from camera_isp.ISP_implement_cbd import ISP
+from skimage import img_as_float32, img_as_ubyte
 
 def str2bool(x):
     return x.lower() == 'true'
 
-def str2none(x):
-    return None if str(x).lower() == 'none' else x
+def jpeg_compress(im, quality=50):
+    '''
+    Args:
+        im: numpy array with RGB channel, uint8
+        quality: compression quality
+    '''
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+    _, encim = cv2.imencode('.jpeg', im[:, :, ::-1], encode_param)
+    decim = cv2.imdecode(encim, cv2.IMREAD_UNCHANGED)
+    return decim[:, :, ::-1]
 
 def update_args(args_json, args_parser):
     for key, value in args_json.items():
@@ -36,7 +39,8 @@ def shifted_anisotropic_Gaussian(k_size=np.array([15, 15]),
                                  lambda_1=1.2,
                                  lambda_2=5.,
                                  theta=0,
-                                 noise_level=0):
+                                 noise_level=0,
+                                 shift='left'):
     """"
     # modified version of https://github.com/cszn/USRNet/blob/master/utils/utils_sisr.py
     """
@@ -51,7 +55,14 @@ def shifted_anisotropic_Gaussian(k_size=np.array([15, 15]),
     INV_SIGMA = np.linalg.inv(SIGMA)[None, None, :, :]
 
     # Set expectation position (shifting kernel for aligned image)
-    MU = k_size // 2 - 0.5*(scale_factor - k_size % 2)
+    if shift.lower() == 'left':
+        MU = k_size // 2 - 0.5*(scale_factor - k_size % 2)
+    elif shift.lower() == 'center':
+        MU = k_size // 2
+    elif shift.lower() == 'right':
+        MU = k_size // 2 + 0.5*(scale_factor - k_size % 2)
+    else:
+        sys.exit('Please input corrected shift parameter: left, right or center!')
     MU = MU[None, None, :, None]
 
     # Create meshgrid for Gaussian
@@ -66,43 +77,6 @@ def shifted_anisotropic_Gaussian(k_size=np.array([15, 15]),
     # Normalize the kernel and return
     kernel = raw_kernel / np.sum(raw_kernel)
     return kernel
-
-def shifted_anisotropic_Gaussian_batch(lambda_1, lambda_2, theta, k_size=15, scale_factor=4):
-    '''
-    Input:
-        lambda_1: tensor
-        lambda_2: tensor, the same size with lambda_1
-        theta: tensor, the same size with lambda_1
-    Output:
-        kernel: d x k x k
-    '''
-    # Set COV matrix using Lambdas and Theta
-    LAMBDA = torch.zeros((lambda_1.numel(), 2, 2), dtype=torch.float32)
-    LAMBDA[:, 0, 0] = lambda_1.view(-1)
-    LAMBDA[:, 1, 1] = lambda_2.view(-1)
-    Q = torch.zeros((lambda_1.numel(), 2, 2), dtype=torch.float32)
-    Q[:, 0, 0] = theta.view(-1).cos()
-    Q[:, 0, 1] = -theta.view(-1).sin()
-    Q[:, 1, 0] = theta.view(-1).sin()
-    Q[:, 1, 1] = theta.view(-1).cos()
-    SIGMA = Q.matmul(LAMBDA).matmul(Q.T)                           # d x 2 x 2
-    INV_SIGMA = torch.inverse(SIGMA).unsqueeze(1).unsqueeze(1)     # d x 1 x 1 x 2 x 2
-
-    # Set expectation position (shifting kernel for aligned image)
-    MU = k_size // 2 - 0.5*(scale_factor - k_size % 2)
-
-    # Create meshgrid for Gaussian
-    [X,Y] = torch.meshgrid(torch.arange(k_size), torch.arange(k_size))
-    Z = torch.stack([X, Y], 2).unsqueeze(3)      # k x k x 2 x 1
-
-    # Calcualte Gaussian for every pixel of the kernel
-    ZZ = Z - MU                                  # k x k x 2 x 1
-    ZZ_t = ZZ.permute(0, 1, 3, 2)              # k x k x 1 x 2
-    raw_kernel = torch.exp(-0.5 * torch.squeeze(ZZ_t.matmul(INV_SIGMA).matmul(ZZ)))  # d x k x k
-
-    # Normalize the kernel and return
-    kernel = raw_kernel / torch.sum(raw_kernel, dim=(1,2), keepdim=True)
-    return kernel.reshape(lambda_1.shape+(k_size, k_size))  # lambda_1.shape x k x k 
 
 def imshow(x, title=None, cbar=False):
     plt.imshow(np.squeeze(x), interpolation='nearest', cmap='gray')
@@ -205,34 +179,6 @@ def calculate_psnr(im1, im2, border=0, ycbcr=False):
         return float('inf')
     return 20 * math.log10(255.0 / math.sqrt(mse))
 
-def generate_gauss_kernel_mix(H, W):
-    '''
-    Generate a H x W mixture Gaussian kernel with mean (center) and std (sigma).
-    Input:
-        H, W: interger
-    '''
-    pch_size = 32
-    K_H = math.floor(H / pch_size)
-    K_W = math.floor(W / pch_size)
-    K = K_H * K_W
-    centerW = np.random.uniform(low=0, high=pch_size, size=(K_H, K_W))
-    ind_W = np.arange(K_W) * pch_size
-    centerW += ind_W.reshape((1, -1))
-    centerW = centerW.reshape((1,1,K)).astype(np.float32)
-    centerH = np.random.uniform(low=0, high=pch_size, size=(K_H, K_W))
-    ind_H = np.arange(K_H) * pch_size
-    centerH += ind_H.reshape((-1, 1))
-    centerH = centerH.reshape((1,1,K)).astype(np.float32)
-    sigma = np.random.uniform(low=pch_size/4, high=pch_size/4*3, size=(1,1,K))
-    sigma = sigma.astype(np.float32)
-    XX, YY = np.meshgrid(np.arange(0, W), np.arange(0,H))
-    XX = XX[:, :, np.newaxis].astype(np.float32)
-    YY = YY[:, :, np.newaxis].astype(np.float32)
-    ZZ = 1 / ( 2*np.pi*sigma**2 ) * np.exp( (-(XX-centerW)**2-(YY-centerH)**2)/(2*sigma**2) )
-    out = ZZ.sum(axis=2, keepdims=False) / K
-
-    return out
-
 def degradation(im_HR, sf, kernel, noise_level,
                 convolve='False',
                 noise_type='signal',
@@ -261,15 +207,9 @@ def degradation(im_HR, sf, kernel, noise_level,
     if downsampler.lower() == 'direct':
         im_blur = im_blur[0::sf, 0::sf, ]
     elif downsampler.lower() == 'bicubic':
-        im_blur = resize(im_blur,
-                         scale_factors=1/sf, 
-                         interp_method = cubic)
-    elif downsampler.lower() == 'bilinear':
-        im_blur = resize(im_blur,
-                         scale_factors=1/sf,
-                         interp_method = linear)
+        im_blur = resize(im_blur, scale_factors=1/sf)
     else:
-        sys.exit('Please input the corrected downsample type: Direct, bicubic, or binear')
+        sys.exit('Please input the corrected downsample type: Direct or bicubic')
 
     # adding noise
     if noise_type.lower() == 'mix':
@@ -288,8 +228,14 @@ def degradation(im_HR, sf, kernel, noise_level,
 
     return im_LR.squeeze()
 
+def calculate_parameters(net):
+    out = 0
+    for param in net.parameters():
+        out += param.numel()
+    return out
+
 def set_seed(seed):
-    print('Setting random seed: {:d}'.format(seed))
+    # print('Setting random seed: {:d}'.format(seed))
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

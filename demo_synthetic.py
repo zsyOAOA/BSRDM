@@ -17,22 +17,23 @@ parser.add_argument('--rho', type=float, default=0.2, help='Hyper-parameter rho,
 
 # degradation settings
 parser.add_argument('--sf', type=int, default=2, help='Scale factor: 2, 3, or 4, (default: 2)')
-parser.add_argument('--noise_type', type=str, default='signal',
-                                                             help='Noise type: Gaussian or Signal, (default: signal)')
-parser.add_argument('--noise_level', type=float, default=2.55, help='Noise Level for Gaussian Noise, (default: 2.55)')
-parser.add_argument('--noise_estimator', type=str, default='niid',
-                                                         help='Noise estimation method: niid or iid, (default: niid)')
+parser.add_argument('--noise_type', type=str, default='Gaussian',
+                                         help='Noise type: Gaussian or Signal, (default: Gaussian)')
+parser.add_argument('--noise_level', type=float, default=2.55,
+                                             help='Noise Level for Gaussian Noise, (default: 2.55)')
+parser.add_argument('--noise_estimator', type=str, default='iid',
+                                        help='Noise estimation method: niid or iid, (default: iid)')
 parser.add_argument('--downsampler', type=str, default='direct',
-                                          help='Downsampler setting: bicubic, bilinear, or direct, (default: direct)')
+                                   help='Downsampler setting: bicubic or direct, (default: direct)')
 args = parser.parse_args()
 
 def main():
-    # load the default options 
-    with open('./options_bsrdm.json', 'r') as f:
+    # load the default options
+    with open('./options/options1.json', 'r') as f:
         opts_json = json.load(f)
     # update part of the default options according to your give setting
     update_args(opts_json, args)
-    
+
     # load HR image
     im_path_HR = './testsets/Set14/lenna.bmp'
     im_HR = cv2.imread(str(im_path_HR), flags=cv2.IMREAD_UNCHANGED)   # [0, 255], uint8
