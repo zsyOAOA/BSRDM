@@ -49,7 +49,7 @@ def main():
         trainer_sisr = Trainer(args, im_LR)
         trainer_sisr.train()
         im_HR_est = trainer_sisr.get_HR_res()
-       save_path = save_dir / (im_name + '_BSRDM.png')
+        save_path = save_dir / (im_name + '_BSRDM.png')
         cv2.imwrite(str(save_path), im_HR_est[:, :, ::-1])
 
 if __name__ == '__main__':
