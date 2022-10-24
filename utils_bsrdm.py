@@ -179,6 +179,46 @@ def calculate_psnr(im1, im2, border=0, ycbcr=False):
         return float('inf')
     return 20 * math.log10(255.0 / math.sqrt(mse))
 
+def generate_gauss_kernel_mix(H, W, rng=None):
+    '''
+    Generate a H x W mixture Gaussian kernel with mean (center) and std (scale).
+    Input:
+        H, W: interger
+        center: mean value of x axis and y axis
+        scale: float value
+    '''
+    pch_size = 32
+    K_H = math.floor(H / pch_size)
+    K_W = math.floor(W / pch_size)
+    K = K_H * K_W
+    # prob = np.random.dirichlet(np.ones((K,)), size=1).reshape((1,1,K))
+    if rng is None:
+        centerW = np.random.uniform(low=0, high=pch_size, size=(K_H, K_W))
+    else:
+        centerW = rng.uniform(low=0, high=pch_size, size=(K_H, K_W))
+    ind_W = np.arange(K_W) * pch_size
+    centerW += ind_W.reshape((1, -1))
+    centerW = centerW.reshape((1,1,K)).astype(np.float32)
+    if rng is None:
+        centerH = np.random.uniform(low=0, high=pch_size, size=(K_H, K_W))
+    else:
+        centerH = rng.uniform(low=0, high=pch_size, size=(K_H, K_W))
+    ind_H = np.arange(K_H) * pch_size
+    centerH += ind_H.reshape((-1, 1))
+    centerH = centerH.reshape((1,1,K)).astype(np.float32)
+    if rng is None:
+        scale = np.random.uniform(low=pch_size/2, high=pch_size, size=(1,1,K))
+    else:
+        scale = rng.uniform(low=pch_size/2, high=pch_size, size=(1,1,K))
+    scale = scale.astype(np.float32)
+    XX, YY = np.meshgrid(np.arange(0, W), np.arange(0,H))
+    XX = XX[:, :, np.newaxis].astype(np.float32)
+    YY = YY[:, :, np.newaxis].astype(np.float32)
+    ZZ = 1./(2*np.pi*scale**2) * np.exp( (-(XX-centerW)**2-(YY-centerH)**2)/(2*scale**2) )
+    out = ZZ.sum(axis=2, keepdims=False) / K
+
+    return out
+
 def degradation(im_HR, sf, kernel, noise_level,
                 convolve='False',
                 noise_type='signal',
@@ -212,13 +252,13 @@ def degradation(im_HR, sf, kernel, noise_level,
         sys.exit('Please input the corrected downsample type: Direct or bicubic')
 
     # adding noise
-    if noise_type.lower() == 'mix':
-        h, w = im_blur.shape[:2]
-        var_map = generate_gauss_kernel_mix(256, 256)
-        var_map = cv2.resize(var_map, (w, h), interpolation=cv2.INTER_LINEAR)
-        var_map = (0.1/255.) + (var_map - var_map.min()) / (var_map.max()-var_map.min()) * ((noise_level - 0.1)/255.)
-        im_LR = im_blur + np.random.randn(*im_blur.shape) * var_map[:, :, None]
-    elif noise_type.lower() == 'signal':
+    # if noise_type.lower() == 'mix':
+        # h, w = im_blur.shape[:2]
+        # var_map = generate_gauss_kernel_mix(256, 256)
+        # var_map = cv2.resize(var_map, (w, h), interpolation=cv2.INTER_LINEAR)
+        # var_map = (0.1/255.) + (var_map - var_map.min()) / (var_map.max()-var_map.min()) * ((noise_level - 0.1)/255.)
+        # im_LR = im_blur + np.random.randn(*im_blur.shape) * var_map[:, :, None]
+    if noise_type.lower() == 'signal':
         isp = ISP()
         im_LR = isp.noise_generate_srgb(im_blur)
     elif noise_type.lower() == 'gaussian':
